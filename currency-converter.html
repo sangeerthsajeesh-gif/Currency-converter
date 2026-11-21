@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Currency Converter</title>
+<style>
+  :root {
+    --bg: #eef3f4; --card: #ffffff; --ink: #12303a; --muted: #5f7a83;
+    --line: #d3e0e3; --accent: #0d7c8f; --accent-ink: #ffffff; --error: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1c21; --card: #14292f; --ink: #e4f1f3; --muted: #8fadb5;
+            --line: #26424a; --accent: #4cc3d6; --accent-ink: #0d1c21; --error: #ff8a80; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    display: grid; place-items: start center; min-height: 100vh; padding: 32px 16px;
+  }
+  main { width: 100%; max-width: 680px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 20px; }
+  .row { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: end; }
+  label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 6px; }
+  input, select {
+    width: 100%; padding: 12px; font-size: 1rem; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .swap {
+    background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px;
+    padding: 12px 14px; font-size: 1.1rem; cursor: pointer;
+  }
+  .amount { margin-top: 16px; }
+  .result { margin-top: 20px; }
+  .result .big { font-size: 2rem; font-weight: 700; }
+  .result .rate { color: var(--muted); font-size: .9rem; margin-top: 4px; }
+  .head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .head h2 { font-size: 1.05rem; margin: 0; }
+  .ranges button {
+    background: transparent; color: var(--ink); border: 1px solid var(--line);
+    padding: 6px 12px; border-radius: 999px; cursor: pointer; font-size: .85rem; margin-left: 4px;
+  }
+  .ranges button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  #chart { width: 100%; height: auto; display: block; }
+  .stats { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 12px; font-size: .9rem; color: var(--muted); }
+  .stats b { color: var(--ink); }
+  .msg { color: var(--muted); padding: 24px 0; text-align: center; }
+  .error { color: var(--error); }
+  @media (max-width: 520px) {
+    .row { grid-template-columns: 1fr; }
+    .swap { justify-self: center; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Currency converter</h1>
+  <p class="sub">Live exchange rates and a price history chart. Rates come from the free Frankfurter API (European Central Bank data).</p>
+
+  <section class="card">
+    <div class="amount">
+      <label for="amount">Amount</label>
+      <input id="amount" type="number" min="0" step="any" value="100" inputmode="decimal">
+    </div>
+    <div class="row" style="margin-top:16px">
+      <div>
+        <label for="from">From</label>
+        <select id="from"></select>
+      </div>
+      <button class="swap" id="swap" type="button" aria-label="Swap currencies">⇄</button>
+      <div>
+        <label for="to">To</label>
+        <select id="to"></select>
+      </div>
+    </div>
+    <div class="result" aria-live="polite">
+      <div class="big" id="converted">–</div>
+      <div class="rate" id="rate"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="head">
+      <h2 id="chartTitle">Trend</h2>
+      <div class="ranges" id="ranges">
+        <button type="button" data-days="7" aria-pressed="false">7D</button>
+        <button type="button" data-days="30" aria-pressed="true">30D</button>
+        <button type="button" data-days="90" aria-pressed="false">90D</button>
+        <button type="button" data-days="365" aria-pressed="false">1Y</button>
+      </div>
+    </div>
+    <div id="chartBox"><div class="msg">Loading chart…</div></div>
+    <div class="stats" id="stats"></div>
+  </section>
+</main>
+
+<script>
+  // ---------- Setup ----------
+  const API = "https://api.frankfurter.dev/v1";
+  const $ = (id) => document.getElementById(id);
+  const amountEl = $("amount"), fromEl = $("from"), toEl = $("to");
+  let days = 30;           // current chart range
+  let latestRate = null;   // 1 FROM = ? TO
+
+  // ---------- Helpers ----------
+  const isoDate = (d) => d.toISOString().slice(0, 10);
+  const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d; };
+  const fmt = (n, max = 2) => n.toLocaleString(undefined, { maximumFractionDigits: max });
+
+  async function getJSON(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Request failed (" + res.status + ")");
+    return res.json();
+  }
+
+  // ---------- 1. Load the list of currencies ----------
+  async function loadCurrencies() {
+    const list = await getJSON(API + "/currencies"); // { USD: "United States Dollar", ... }
+    const options = Object.entries(list)
+      .map(([code, name]) => `<option value="${code}">${code} – ${name}</option>`).join("");
+    fromEl.innerHTML = options;
+    toEl.innerHTML = options;
+    fromEl.value = "USD";
+    toEl.value = "INR" in list ? "INR" : "EUR";
+  }
+
+  // ---------- 2. Convert using the latest rate ----------
+  async function updateConversion() {
+    const from = fromEl.value, to = toEl.value;
+    if (from === to) {
+      latestRate = 1;
+    } else {
+      try {
+        const data = await getJSON(`${API}/latest?base=${from}&symbols=${to}`);
+        latestRate = data.rates[to];
+        $("rate").textContent = `1 ${from} = ${fmt(latestRate, 4)} ${to} · updated ${data.date}`;
+      } catch (e) {
+        $("converted").textContent = "–";
+        $("rate").innerHTML = `<span class="error">Could not load rates. Check your internet connection.</span>`;
+        return;
+      }
+    }
+    if (from === to) $("rate").textContent = "Same currency selected.";
+    renderAmount();
+  }
+
+  function renderAmount() {
+    const amount = parseFloat(amountEl.value);
+    if (isNaN(amount) || latestRate === null) { $("converted").textContent = "–"; return; }
+    $("converted").textContent = `${fmt(amount * latestRate)} ${toEl.value}`;
+  }
+
+  // ---------- 3. Historical chart ----------
+  async function updateChart() {
+    const from = fromEl.value, to = toEl.value;
+    $("chartTitle").textContent = `${from} to ${to}`;
+    $("stats").innerHTML = "";
+    if (from === to) { $("chartBox").innerHTML = `<div class="msg">Pick two different currencies to see a trend.</div>`; return; }
+    $("chartBox").innerHTML = `<div class="msg">Loading chart…</div>`;
+    try {
+      const url = `${API}/${isoDate(daysAgo(days))}..${isoDate(new Date())}?base=${from}&symbols=${to}`;
+      const data = await getJSON(url);
+      // data.rates looks like { "2026-10-21": { INR: 88.1 }, ... }
+      const points = Object.entries(data.rates).map(([date, r]) => ({ date, value: r[to] }));
+      if (points.length < 2) throw new Error("Not enough data");
+      drawChart(points);
+      showStats(points, to);
+    } catch (e) {
+      $("chartBox").innerHTML = `<div class="msg error">Could not load history. ${e.message}</div>`;
+    }
+  }
+
+  function showStats(points, to) {
+    const values = points.map(p => p.value);
+    const first = values[0], last = values[values.length - 1];
+    const change = ((last - first) / first) * 100;
+    $("stats").innerHTML =
+      `<span>High <b>${fmt(Math.max(...values), 4)}</b></span>` +
+      `<span>Low <b>${fmt(Math.min(...values), 4)}</b></span>` +
+      `<span>Change <b>${change >= 0 ? "+" : ""}${change.toFixed(2)}%</b></span>`;
+  }
+
+  // Draws an SVG line chart by hand: no library needed.
+  function drawChart(points) {
+    const W = 640, H = 280, pad = { l: 56, r: 12, t: 12, b: 28 };
+    const values = points.map(p => p.value);
+    let min = Math.min(...values), max = Math.max(...values);
+    if (min === max) { min -= 1; max += 1; }
+    const margin = (max - min) * 0.1; min -= margin; max += margin;
+
+    const x = (i) => pad.l + (i / (points.length - 1)) * (W - pad.l - pad.r);
+    const y = (v) => pad.t + (1 - (v - min) / (max - min)) * (H - pad.t - pad.b);
+
+    const line = points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(" ");
+    const area = `${line} L${x(points.length - 1)},${H - pad.b} L${x(0)},${H - pad.b} Z`;
+
+    // Horizontal grid lines with value labels
+    let grid = "";
+    for (let i = 0; i <= 4; i++) {
+      const v = min + ((max - min) * i) / 4, yy = y(v);
+      grid += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${yy}" y2="${yy}" stroke="var(--line)"/>` +
+              `<text x="${pad.l - 8}" y="${yy + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${fmt(v, 3)}</text>`;
+    }
+    // First and last date labels
+    const dateLabels =
+      `<text x="${pad.l}" y="${H - 8}" font-size="11" fill="var(--muted)">${points[0].date}</text>` +
+      `<text x="${W - pad.r}" y="${H - 8}" text-anchor="end" font-size="11" fill="var(--muted)">${points[points.length - 1].date}</text>`;
+
+    $("chartBox").innerHTML = `
+      <svg id="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Exchange rate history chart">
+        ${grid}
+        <path d="${area}" fill="var(--accent)" opacity=".12"/>
+        <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round"/>
+        ${dateLabels}
+        <line id="hoverLine" y1="${pad.t}" y2="${H - pad.b}" stroke="var(--muted)" stroke-dasharray="3" visibility="hidden"/>
+        <circle id="hoverDot" r="5" fill="var(--accent)" visibility="hidden"/>
+        <text id="hoverText" font-size="12" fill="var(--ink)" visibility="hidden"></text>
+        <rect id="hit" x="${pad.l}" y="${pad.t}" width="${W - pad.l - pad.r}" height="${H - pad.t - pad.b}" fill="transparent"/>
+      </svg>`;
+
+    // Hover: find the nearest point to the cursor and show its value
+    const svg = $("chart"), hit = $("hit");
+    hit.addEventListener("pointermove", (e) => {
+      const box = svg.getBoundingClientRect();
+      const px = ((e.clientX - box.left) / box.width) * W;
+      const i = Math.max(0, Math.min(points.length - 1, Math.round(((px - pad.l) / (W - pad.l - pad.r)) * (points.length - 1))));
+      const p = points[i];
+      $("hoverLine").setAttribute("x1", x(i)); $("hoverLine").setAttribute("x2", x(i));
+      $("hoverDot").setAttribute("cx", x(i)); $("hoverDot").setAttribute("cy", y(p.value));
+      const t = $("hoverText");
+      t.textContent = `${p.date}: ${fmt(p.value, 4)}`;
+      t.setAttribute("x", Math.min(Math.max(x(i), 120), W - 120));
+      t.setAttribute("y", pad.t + 14);
+      t.setAttribute("text-anchor", "middle");
+      ["hoverLine", "hoverDot", "hoverText"].forEach(id => $(id).setAttribute("visibility", "visible"));
+    });
+    hit.addEventListener("pointerleave", () => {
+      ["hoverLine", "hoverDot", "hoverText"].forEach(id => $(id).setAttribute("visibility", "hidden"));
+    });
+  }
+
+  // ---------- Events ----------
+  amountEl.addEventListener("input", renderAmount);
+  [fromEl, toEl].forEach(el => el.addEventListener("change", () => { updateConversion(); updateChart(); }));
+  $("swap").addEventListener("click", () => {
+    [fromEl.value, toEl.value] = [toEl.value, fromEl.value];
+    updateConversion(); updateChart();
+  });
+  $("ranges").addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    days = Number(btn.dataset.days);
+    document.querySelectorAll("#ranges button").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+    updateChart();
+  });
+
+  // ---------- Start ----------
+  (async function init() {
+    try {
+      await loadCurrencies();
+      await updateConversion();
+      await updateChart();
+    } catch (e) {
+      $("rate").innerHTML = `<span class="error">Could not reach the exchange rate API. Check your connection and reload.</span>`;
+      $("chartBox").innerHTML = "";
+    }
+  })();
+</script>
+</body>
+</html>
